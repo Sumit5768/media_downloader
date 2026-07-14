@@ -1,0 +1,13 @@
+# Environment variables
+.env
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Download folder (agar temporary files store hote hain)

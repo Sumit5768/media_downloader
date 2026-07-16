@@ -1,5 +1,3 @@
-
-
 import logging
 import os
 import re
@@ -22,7 +20,8 @@ from telegram.ext import (
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+_default_port = os.getenv("PORT", "8000")
+API_BASE_URL = os.getenv("API_BASE_URL", f"http://127.0.0.1:{_default_port}").rstrip("/")
 
 if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN is missing. Add BOT_TOKEN=xxxx to your .env file.")
@@ -133,15 +132,21 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────
 
+def build_application():
+    """Create (but do not run) the Telegram Application. Used both standalone and
+    when embedded inside main.py's FastAPI process."""
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(error_handler)
+    return application
+
+
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
-
+    """Standalone entry point: `python telegram_bot.py`."""
+    application = build_application()
     logger.info(f"Bot starting (polling mode). Using API at {API_BASE_URL} ...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

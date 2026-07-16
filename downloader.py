@@ -1,4 +1,3 @@
-
 """
 downloader.py — Universal yt-dlp wrapper
 YouTube, Instagram, Facebook, LinkedIn, Twitter/X, TikTok, Vimeo, Reddit, 1000+ sites
@@ -306,74 +305,96 @@ if __name__ == "__main__":
     u = sys.argv[1] if len(sys.argv) > 1 else input("URL: ").strip()
     print(json.dumps(get_download_links(u), indent=2, ensure_ascii=False))
 
-def stream_download(url: str, format_id: str, cookies_map: dict = None):
+def prepare_stream(url: str, format_id: str, cookies_map: dict = None) -> dict:
     """
-    yt-dlp se file ko disk pe save kiye bina seedha bytes yield karta hai.
-    Server pe koi temp file nahi banti — double download band.
+    yt-dlp se file ko ek temp folder mein download/merge karta hai aur
+    path + size + cleanup() function return karta hai.
+
+    Yeh function ka size return karna zaroori hai taaki main.py Content-Length
+    header set kar sake — is header ke bina browser progress % / size nahi
+    dikha sakta, chahe streaming kitni bhi sahi ho.
     """
-    import tempfile, os
+    import tempfile, shutil
 
     cf = _get_cookies(url, cookies_map or {})
+    tmpdir = tempfile.mkdtemp()
 
-    # Thumbnail — seedha URL se stream karo
-    if format_id == "thumbnail":
-        try:
-            with yt_dlp.YoutubeDL(_opts(cf)) as ydl:
-                info = ydl.extract_info(url, download=False)
-            thumb_url = info.get("thumbnail", "")
-        except:
-            thumb_url = url
+    def cleanup():
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
-        req = urllib.request.Request(thumb_url)
-        req.add_header("User-Agent", "Mozilla/5.0")
-        with urllib.request.urlopen(req, timeout=15) as res:
-            while True:
-                chunk = res.read(1024 * 64)
-                if not chunk:
-                    break
-                yield chunk
-        return
+    try:
+        # Thumbnail — seedha URL se download karo (chota, tez)
+        if format_id == "thumbnail":
+            try:
+                with yt_dlp.YoutubeDL(_opts(cf)) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                thumb_url = info.get("thumbnail", "")
+            except Exception:
+                thumb_url = url
 
-    # Video / Audio — temp file mein download karo, stream karo, delete karo
-    with tempfile.TemporaryDirectory() as tmpdir:
-        uid = str(uuid.uuid4())
-        out = os.path.join(tmpdir, f"{uid}.%(ext)s")
+            ext = thumb_url.split("?")[0].rsplit(".", 1)[-1] or "jpg"
+            ext = ext if len(ext) <= 5 else "jpg"
+            path = os.path.join(tmpdir, f"thumb.{ext}")
 
-        if format_id == "bestaudio":
-            opts = _opts(cf, url=url, extra={
-                "format": "bestaudio/best",
-                "outtmpl": out,
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }],
-            })
+            req = urllib.request.Request(thumb_url)
+            req.add_header("User-Agent", "Mozilla/5.0")
+            with urllib.request.urlopen(req, timeout=15) as res, open(path, "wb") as f:
+                shutil.copyfileobj(res, f)
+
         else:
-            opts = _opts(cf, url=url, extra={
-                "format": f"{format_id}+bestaudio/{format_id}/best",
-                "merge_output_format": "mp4",
-                "outtmpl": out,
-            })
+            uid = str(uuid.uuid4())
+            out = os.path.join(tmpdir, f"{uid}.%(ext)s")
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
+            if format_id == "bestaudio":
+                opts = _opts(cf, url=url, extra={
+                    "format": "bestaudio/best",
+                    "outtmpl": out,
+                    "postprocessors": [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }],
+                })
+            else:
+                opts = _opts(cf, url=url, extra={
+                    "format": f"{format_id}+bestaudio/{format_id}/best",
+                    "merge_output_format": "mp4",
+                    "outtmpl": out,
+                })
 
-        # Find the output file
-        path = None
-        for f in os.listdir(tmpdir):
-            if f.startswith(uid):
-                path = os.path.join(tmpdir, f)
-                break
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
 
-        if not path or not os.path.exists(path):
-            raise FileNotFoundError("yt-dlp file not created")
+            path = None
+            for f in os.listdir(tmpdir):
+                if f.startswith(uid):
+                    path = os.path.join(tmpdir, f)
+                    break
+            if not path or not os.path.exists(path):
+                raise FileNotFoundError("yt-dlp file not created")
 
-        # Seedha stream karo
+        size = os.path.getsize(path)
+        return {"path": path, "size": size, "cleanup": cleanup}
+
+    except Exception:
+        cleanup()
+        raise
+
+
+def iter_file(path: str, cleanup, chunk_size: int = 512 * 1024):
+    """Chunk-by-chunk file reader. Cleanup temp folder once fully sent (or on error)."""
+    try:
         with open(path, "rb") as f:
             while True:
-                chunk = f.read(1024 * 512)  # 512KB chunks
+                chunk = f.read(chunk_size)
                 if not chunk:
                     break
                 yield chunk
-        # TemporaryDirectory automatically delete ho jaayega
+    finally:
+        cleanup()
+
+
+def stream_download(url: str, format_id: str, cookies_map: dict = None):
+    """Kept for backward compatibility — downloads fully then streams from disk."""
+    info = prepare_stream(url, format_id, cookies_map)
+    yield from iter_file(info["path"], info["cleanup"])
